@@ -1,0 +1,998 @@
+---
+title: "Random Forest Robustness to Class Imbalance:An Empirical Study with Adaptive Sampling Strategy"
+file_name: "final_project_group9"
+authors: Elif Göksu Öztürk, Simão Bernardo
+output: html_document
+date: "2025-12-01"
+---
+
+```{r}
+# Load all required libraries
+library(randomForest)    # For random forest implementation
+library(caret)           # For data splitting and model evaluation
+library(dplyr)           # For data manipulation
+library(purrr)           # For functional programming
+library(pROC)            # For ROC curve analysis
+library(PRROC)           # For precision-recall curves
+library(ggplot2)         # For data visualization
+library(xml2)            # For parsing XML files in datasets
+library(kableExtra)      # For enhanced table formatting
+```
+
+# 1. Introduction
+
+## 1.1 The Challenge of Class Imbalance in Real-World Machine Learning
+
+In many practical machine learning applications, we encounter datasets where one class significantly outnumbers the others—a phenomenon known as class imbalance. This occurs in numerous real-world scenarios: fraud detection (where most transactions are legitimate), medical diagnosis (where most patients are healthy), and manufacturing defect detection (where most products meet quality standards). Traditional classification algorithms, including the popular Random Forest, often struggle with imbalanced data because they are designed to maximize overall accuracy, which can lead to poor performance on the minority class that is frequently the most important to identify correctly.
+
+*Scope:* This study focuses on **binary classification** scenarios, investigating how class imbalance affects Random Forest performance and proposing an adaptive sampling strategy that dynamically adjusts to different levels of imbalance severity. Through systematic experimentation across multiple binary datasets, we demonstrate that our adaptive approach significantly improves minority class recognition while maintaining competitive overall performance.
+
+## 1.2 Project Objectives and Research Questions
+
+The primary goal of this study is to answer the following research questions:
+
+1.  How severely does class imbalance degrade Random Forest's performance on minority class prediction?
+2.  Can adaptive sampling strategies combined with class weighting effectively mitigate this degradation?
+3.  How does the effectiveness of different imbalance-handling techniques vary with the degree of imbalance?
+
+By addressing these questions, we aim to provide practitioners with a more robust Random Forest variant that performs reliably across various imbalance scenarios.
+
+# 2. Theoretical Framework
+
+## 2.1 Random Forest Fundamentals
+
+Random Forest is an ensemble learning method that operates by constructing multiple decision trees during training and outputting the mode of the classes (classification) or mean prediction (regression) of the individual trees. The algorithm's strength comes from two key sources of randomness:
+
+-   **Bootstrap sampling**: Each tree is trained on a random subset of the training data
+-   **Feature randomness**: At each split, the algorithm considers only a random subset of features
+
+This dual randomness helps create diverse trees that collectively form a robust model, less prone to overfitting than individual decision trees.
+
+## 2.2 Why Random Forest Struggles with Imbalanced Data
+
+Despite its general robustness, Random Forest exhibits several vulnerabilities when faced with class imbalance:
+
+**Bootstrap Sampling Bias**: The random sampling with replacement used to create training sets for each tree can lead to under-representation of minority class instances, particularly in severe imbalance scenarios. Some trees might even be trained without any minority class examples.
+
+**Split Criterion Limitations**: The Gini impurity and information gain criteria used for node splitting tend to favor partitions that separate majority class instances effectively, as they contribute more substantially to overall impurity reduction.
+
+**Majority Voting Dominance**: The final prediction is determined by majority vote across all trees. This ensemble mechanism inherently favors the class with more representatives in the training data.
+
+**Instance Proximity Issues**: In high-dimensional spaces, minority class instances become increasingly isolated, making it difficult for the algorithm to learn meaningful decision boundaries.
+
+## 2.3 Existing Approaches and Their Limitations
+
+Several strategies have been proposed to address class imbalance in Random Forest:
+
+**Class Weighting**: Assigning higher weights to minority class instances during training. While conceptually simple, this approach often provides limited improvement in severe imbalance scenarios.
+
+**Oversampling Techniques**: Methods like SMOTE generate synthetic minority class instances. However, these can introduce noise and overfitting, particularly in high-dimensional spaces.
+
+**Undersampling Methods**: Reducing majority class instances to balance the dataset. This approach risks losing important information from the majority class.
+
+Our proposed method seeks to overcome these limitations through an adaptive approach that responds to the specific characteristics of each dataset's imbalance pattern.
+
+# 3. Proposed Methodology: Adaptive Random Forest
+
+## 3.1 Core Innovation: Multi-Stage Adaptive Strategy
+
+We propose an Enhanced Random Forest that dynamically adjusts its sampling strategy based on the severity of class imbalance. The key insight is that different imbalance levels require different intervention strategies:
+
+-   **Mild Imbalance (IR ≤ 3)**: Minor adjustments preserve majority class information while giving the minority class a slight boost
+-   **Moderate Imbalance (3 \< IR ≤ 10)**: Balanced sampling creates optimal learning conditions
+-   **Severe Imbalance (IR \> 10)**: Aggressive interventions are necessary to ensure minority class representation
+
+This adaptive approach ensures that we apply the appropriate level of intervention for each specific scenario, avoiding both under-correction in severe cases and over-correction in mild cases.
+
+## 3.2 Dual-Protection Mechanism
+
+Our enhanced algorithm employs two complementary protection mechanisms:
+
+1.  **Adaptive Sampling (`sampsize`)**: Controls the number of instances from each class in each bootstrap sample
+2.  **Class Weighting (`classwt`)**: Adjusts the importance of each class during tree construction
+
+This dual approach operates at both the data level (through sampling) and the algorithm level (through weighting), providing comprehensive protection against class imbalance bias.
+
+# 4. Experimental Setup
+
+## 4.1 Data Collection and Preprocessing Pipeline
+
+To ensure a comprehensive evaluation, we developed a robust data loading and preprocessing pipeline that handles the diverse formats and characteristics of real-world datasets.
+
+### 4.1.1 Dataset Loading Implementation
+
+```{r}
+
+# The load_openml_datasets function processes multiple OpenML dataset files
+# It handles ARFF file parsing, XML metadata reading, and basic data validation
+load_openml_datasets <- function(datasets_folde, 
+                                 max_samples, 
+                                 max_datasets) {
+  datasets <- list()
+  
+  # Validate datasets directory exists
+  if (!dir.exists(datasets_folder)) {
+    stop(paste("Datasets folder not found:", datasets_folder))
+  }
+  
+  # Discover all dataset directories
+  all_files <- list.files(datasets_folder, recursive = TRUE, full.names = TRUE)
+  dataset_dirs <- unique(dirname(all_files))
+  
+  # Limit number of datasets for computational efficiency
+  if (length(dataset_dirs) > max_datasets + 1) {
+    dataset_dirs <- dataset_dirs[1:(max_datasets + 1)]
+  }
+  
+  cat("Found", length(dataset_dirs), "dataset directories\n\n")
+  
+  # Process each dataset directory
+  for (dataset_dir in dataset_dirs) {
+    dataset_id <- basename(dataset_dir)
+    if (dataset_dir == datasets_folder) next  # Skip root directory
+    
+    tryCatch({
+      cat("Loading dataset:", dataset_id, "... ")
+      
+      # Locate ARFF data files (primary OpenML format)
+      arff_files <- list.files(dataset_dir, pattern = "\\.arff$", full.names = TRUE)
+      if (length(arff_files) == 0) {
+        # Try alternative file extension
+        arff_files <- list.files(dataset_dir, pattern = "\\.ariff$", full.names = TRUE)
+      }
+      if (length(arff_files) == 0) {
+        cat("No ARFF file found\n")
+        next
+      }
+      
+      arff_file <- arff_files[1]
+      lines <- readLines(arff_file, warn = FALSE)
+      
+      # Parse ARFF file structure
+      data_section <- FALSE
+      attributes <- list()
+      data_lines <- character()
+      
+      for (line in lines) {
+        line <- trimws(line)
+        if (line == "" || substr(line, 1, 1) == "%") next  # Skip empty lines and comments
+        
+        # Parse attribute definitions
+        if (grepl("^@attribute", tolower(line))) {
+          parts <- strsplit(line, "\\s+", perl = TRUE)[[1]]
+          if (length(parts) >= 3) {
+            attr_name <- gsub("^'|'$", "", parts[2])  # Remove quotes from attribute names
+            attr_type <- paste(parts[3:length(parts)], collapse = " ")
+            attributes <- c(attributes, list(list(name = attr_name, type = attr_type)))
+          }
+        } else if (grepl("^@data", tolower(line))) {
+          data_section <- TRUE  # Start reading data section
+        } else if (data_section && line != "") {
+          data_lines <- c(data_lines, line)  # Collect data rows
+        }
+      }
+      
+      if (length(data_lines) == 0) {
+        cat("No data found\n")
+        next
+      }
+      
+      # Parse individual data instances
+      rows <- list()
+      for (line in data_lines) {
+        # Handle both comma-separated and space-separated formats
+        values <- if (grepl(",", line)) strsplit(line, ",")[[1]] else strsplit(line, "\\s+")[[1]]
+        values <- trimws(gsub('["\']', '', values))  # Clean quotation marks
+        if (length(values) > 0 && any(values != "")) {
+          rows <- c(rows, list(values))
+        }
+      }
+      
+      if (length(rows) == 0) {
+        cat("No valid data rows\n")
+        next
+      }
+      
+      # Construct data frame with proper column names
+      column_names <- sapply(attributes, function(x) x$name)
+      n_cols <- length(rows[[1]])
+      if (n_cols != length(column_names)) {
+        # Fallback naming if attribute count doesn't match data columns
+        column_names <- paste0("V", 1:n_cols)
+      }
+      
+      df <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+      colnames(df) <- column_names[1:ncol(df)]
+      
+      # Convert data types intelligently
+      for (i in 1:ncol(df)) {
+        numeric_vals <- suppressWarnings(as.numeric(df[[i]]))
+        if (!any(is.na(numeric_vals))) {
+          df[[i]] <- numeric_vals  # Convert to numeric if possible
+        } else if (i <= length(attributes)) {
+          attr_type <- attributes[[i]]$type
+          if (grepl("^\\{.*\\}$", attr_type)) {
+            df[[i]] <- as.factor(df[[i]])  # Convert to factor for categorical data
+          }
+        }
+      }
+      
+      # Identify target variable using metadata or heuristic
+      target_column <- NULL
+      features_file <- file.path(dataset_dir, "features.xml")
+      if (file.exists(features_file)) {
+        tryCatch({
+          doc <- read_xml(features_file)
+          feature_nodes <- xml_find_all(doc, "//feature")
+          for (feature in feature_nodes) {
+            is_target <- xml_find_first(feature, "is_target")
+            if (!is.null(is_target) && tolower(xml_text(is_target)) == "true") {
+              name_node <- xml_find_first(feature, "name")
+              if (!is.null(name_node)) {
+                target_column <- xml_text(name_node)
+                break
+              }
+            }
+          }
+        }, error = function(e) {
+          # Fall through to heuristic if XML parsing fails
+        })
+      }
+      
+      # Use last column as target if no metadata available
+      if (is.null(target_column) || !target_column %in% colnames(df)) {
+        target_column <- colnames(df)[ncol(df)]
+      }
+      
+      # Apply preprocessing pipeline
+      preprocessed <- preprocess_dataset(df, target_column, max_samples)
+      
+      if (!is.null(preprocessed)) {
+        datasets[[dataset_id]] <- preprocessed
+        cat("✓ (", nrow(preprocessed$X), "x", ncol(preprocessed$X), ", ", 
+            length(unique(preprocessed$y)), " classes, IR=", 
+            round(preprocessed$imbalance_ratio, 2), ")\n", sep="")
+      }
+      
+    }, error = function(e) {
+      cat("Failed:", e$message, "\n")
+    })
+  }
+  
+  return(datasets)
+}
+
+```
+
+### 4.1.2 Data Preprocessing and Cleaning
+
+```{r}
+# The preprocess_dataset function standardizes datasets for consistent evaluation
+# It handles missing values, constant features, and ensures binary classification
+
+preprocess_dataset <- function(df, target_column, max_samples = 1000) {
+  # Remove completely empty rows
+  df <- df[!apply(df, 1, function(x) all(is.na(x))), ]
+  
+  # Limit dataset size for computational efficiency while preserving distribution
+  if (nrow(df) > max_samples) {
+    set.seed(42)  # Ensure reproducibility
+    df <- df[sample(nrow(df), max_samples), ]
+  }
+  
+  # Validate target column exists
+  if (!target_column %in% colnames(df)) return(NULL)
+  
+  # Separate features (X) and target (y)
+  X <- df[, !colnames(df) %in% target_column, drop = FALSE]
+  y <- df[[target_column]]
+  
+  # Clean feature names for compatibility with modeling functions
+  colnames(X) <- make.names(colnames(X), unique = TRUE)
+  colnames(X) <- gsub("\\.", "_", colnames(X))
+  
+  # Remove features with excessive missing values (>50%)
+  missing_ratio <- sapply(X, function(x) mean(is.na(x)))
+  X <- X[, missing_ratio <= 0.5, drop = FALSE]
+  
+  # Remove constant features that provide no predictive information
+  constant_cols <- sapply(X, function(x) length(unique(na.omit(x))) <= 1)
+  X <- X[, !constant_cols, drop = FALSE]
+  
+  if (ncol(X) == 0) return(NULL)  # Skip if no features remain
+  
+  # Convert all features to numeric matrix for algorithm compatibility
+  X_matrix <- matrix(0, nrow = nrow(X), ncol = ncol(X))
+  colnames(X_matrix) <- colnames(X)
+  
+  for (i in 1:ncol(X)) {
+    if (is.numeric(X[[i]])) {
+      X_matrix[, i] <- as.numeric(X[[i]])  # Keep numeric features as-is
+    } else {
+      # Convert categorical features to numeric codes
+      X_matrix[, i] <- as.numeric(as.factor(X[[i]]))
+    }
+  }
+  
+  # Handle remaining missing values by imputation with 0
+  X_matrix[is.na(X_matrix)] <- 0
+  
+  # Convert target to numeric with consistent encoding
+  y_numeric <- as.numeric(as.factor(y))
+  
+  # Calculate class distribution and imbalance ratio
+  class_counts <- table(y_numeric)
+  imbalance_ratio <- max(class_counts) / min(class_counts)
+  
+  # Validate dataset meets minimum requirements
+  if (length(unique(y_numeric)) < 2 || nrow(X_matrix) < 30) return(NULL)
+  
+  # Focus on binary classification problems for this study
+  if (length(unique(y_numeric)) != 2) return(NULL)
+  
+  return(list(
+    X = X_matrix,
+    y = y_numeric,
+    original_target = y,
+    target_column = target_column,
+    imbalance_ratio = imbalance_ratio
+  ))
+}
+```
+
+## 4.2 Model Implementations
+
+We implemented three Random Forest variants to enable comparative analysis:
+
+### 4.2.1 Baseline: Standard Random Forest
+
+```{r}
+# Standard Random Forest serves as our baseline implementation
+# It uses the classic algorithm without any imbalance-specific adjustments
+
+StandardRandomForest <- function(n_estimators = 100, random_state = 42) {
+  rf_model <- NULL
+  feature_names <- NULL
+  
+  fit <- function(X, y) {
+    set.seed(random_state)  # Ensure reproducible results
+    feature_names <<- colnames(X)  # Store feature names for prediction
+    
+    # Prepare training data in data.frame format required by randomForest
+    train_data <- data.frame(X)
+    train_data$target <- as.factor(y)
+    
+    # Train the Random Forest model with standard parameters
+    rf_model <<- randomForest(
+      target ~ .,           # Formula: predict target using all features
+      data = train_data,
+      ntree = n_estimators, # Number of trees in the forest
+      mtry = max(1, floor(sqrt(ncol(X)))),  # Typical mtry for classification
+      importance = TRUE     # Calculate variable importance
+    )
+  }
+  
+  predict_func <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    # Prepare test data with same feature structure as training
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    predictions <- predict(rf_model, X_df, type = "response")
+    return(as.numeric(as.character(predictions)))  # Return numeric predictions
+  }
+  
+  predict_proba <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    # Return class probabilities for ROC/AUC calculations
+    return(predict(rf_model, X_df, type = "prob"))
+  }
+  
+  # Return interface functions and model name
+  list(fit = fit, predict = predict_func, predict_proba = predict_proba, 
+       name = "Standard RF")
+}
+```
+
+### 4.2.2 Intermediate Approach: Class-Weighted Random Forest
+
+```{r}
+# Balanced Random Forest uses inverse class frequency weighting
+# This approach gives more importance to minority class instances
+
+BalancedRandomForest <- function(n_estimators = 100, random_state = 42) {
+  rf_model <- NULL
+  feature_names <- NULL
+  
+  fit <- function(X, y) {
+    set.seed(random_state)
+    feature_names <<- colnames(X)
+    
+    train_data <- data.frame(X)
+    train_data$target <- as.factor(y)
+    
+    # Calculate class weights inversely proportional to class frequencies
+    class_counts <- table(y)
+    class_weights <- 1 / class_counts  # Inverse frequency weighting
+    class_weights <- class_weights / sum(class_weights) * length(class_counts)
+    
+    # Train with class weights to bias learning toward minority class
+    rf_model <<- randomForest(
+      target ~ .,
+      data = train_data,
+      ntree = n_estimators,
+      mtry = max(1, floor(sqrt(ncol(X)))),
+      classwt = class_weights,  # Key difference: class weighting
+      importance = TRUE
+    )
+  }
+  
+  predict_func <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    predictions <- predict(rf_model, X_df, type = "response")
+    return(as.numeric(as.character(predictions)))
+  }
+  
+  predict_proba <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    return(predict(rf_model, X_df, type = "prob"))
+  }
+  
+  list(fit = fit, predict = predict_func, predict_proba = predict_proba, 
+       name = "Balanced RF")
+}
+
+```
+
+### 4.2.3 Proposed Approach: Enhanced Adaptive Random Forest
+
+```{r}
+# Enhanced Random Forest combines adaptive sampling with class weighting
+# It dynamically adjusts strategy based on imbalance severity
+
+EnhancedRandomForest <- function(n_estimators = 100, random_state = 42) {
+  rf_model <- NULL
+  feature_names <- NULL
+  
+  fit <- function(X, y) {
+    set.seed(random_state)
+    feature_names <<- colnames(X)
+    
+    train_data <- data.frame(X)
+    train_data$target <- as.factor(y)
+    
+    # Analyze class distribution to determine imbalance severity
+    class_counts <- table(y)
+    n_minority <- min(class_counts)
+    n_majority <- max(class_counts)
+    imbalance_ratio <- n_majority / n_minority
+    
+    # ADAPTIVE SAMPLING STRATEGY: Adjust based on imbalance severity
+    if (imbalance_ratio > 10) {
+      # Severe imbalance: aggressive minority oversampling + gentle majority undersampling
+      sample_sizes <- c(min(200, n_minority * 2),  # Boost minority representation
+                        min(150, n_majority * 0.5)) # Reduce majority influence
+    } else if (imbalance_ratio > 3) {
+      # Moderate imbalance: balanced sampling for optimal learning
+      target_size <- min(150, ceiling((n_minority + n_majority) / 2))
+      sample_sizes <- rep(target_size, 2)  # Equal sampling from both classes
+    } else {
+      # Mild imbalance: standard approach with slight minority boost
+      sample_sizes <- c(min(100, n_minority), 
+                        min(100, n_majority))
+    }
+    
+    # Ensure sample sizes don't exceed actual class counts
+    sample_sizes <- pmin(sample_sizes, as.numeric(class_counts))
+    
+    # DUAL PROTECTION: Combine adaptive sampling with class weighting
+    class_weights <- 1 / class_counts
+    class_weights <- class_weights / sum(class_weights) * length(class_counts)
+    
+    # Train with both adaptive sampling and class weighting
+    rf_model <<- randomForest(
+      target ~ .,
+      data = train_data,
+      ntree = n_estimators,
+      mtry = max(1, floor(sqrt(ncol(X)))),
+      sampsize = sample_sizes,    # Adaptive sampling sizes
+      classwt = class_weights,    # Class importance weighting
+      strata = train_data$target, # Ensure stratified sampling
+      importance = TRUE
+    )
+  }
+  
+  predict_func <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    predictions <- predict(rf_model, X_df, type = "response")
+    return(as.numeric(as.character(predictions)))
+  }
+  
+  predict_proba <- function(X) {
+    if (is.null(rf_model)) stop("Model not fitted")
+    X_df <- data.frame(X)
+    colnames(X_df) <- feature_names
+    return(predict(rf_model, X_df, type = "prob"))
+  }
+  
+  list(fit = fit, predict = predict_func, predict_proba = predict_proba, 
+       name = "Enhanced RF")
+}
+```
+
+## 4.3 Evaluation Framework
+
+### 4.3.1 Comprehensive Metrics Calculation
+
+```{r}
+# calculate_metrics provides comprehensive performance evaluation
+# It computes both standard metrics and imbalance-specific measures
+
+calculate_metrics <- function(y_true, y_pred, y_prob = NULL) {
+  metrics <- list()
+  
+  # Ensure consistent factor levels for confusion matrix calculation
+  all_levels <- unique(c(y_true, y_pred))
+  y_true_fact <- factor(y_true, levels = all_levels)
+  y_pred_fact <- factor(y_pred, levels = all_levels)
+  
+  # Compute confusion matrix and standard metrics
+  cm <- confusionMatrix(y_pred_fact, y_true_fact)
+  
+  # Extract standard classification metrics
+  metrics$accuracy <- as.numeric(cm$overall['Accuracy'])
+  metrics$balanced_accuracy <- as.numeric(cm$byClass['Balanced Accuracy'])
+  metrics$precision <- as.numeric(cm$byClass['Precision'])
+  metrics$recall <- as.numeric(cm$byClass['Recall'])
+  metrics$f1 <- as.numeric(cm$byClass['F1'])
+  metrics$specificity <- as.numeric(cm$byClass['Specificity'])
+  
+  # Calculate minority class metrics manually for reliability
+  class_counts <- table(y_true)
+  minority_class <- names(which.min(class_counts))
+  majority_class <- names(which.max(class_counts))
+  
+  # Manual calculation of minority recall (our primary metric)
+  minority_indices <- which(y_true == as.numeric(minority_class))
+  if (length(minority_indices) > 0) {
+    minority_correct <- sum(y_pred[minority_indices] == y_true[minority_indices])
+    metrics$minority_recall <- minority_correct / length(minority_indices)
+  } else {
+    metrics$minority_recall <- NA
+  }
+  
+  # Compute probabilistic metrics if probability estimates available
+  if (!is.null(y_prob) && ncol(y_prob) >= 2) {
+    tryCatch({
+      prob_positive <- y_prob[, 2]  # Probability of positive class
+      
+      # ROC-AUC: Overall classification performance
+      roc_obj <- roc(y_true, prob_positive, quiet = TRUE)
+      metrics$roc_auc <- as.numeric(auc(roc_obj))
+      
+      # PR-AUC: More informative for imbalanced data
+      pr_curve <- pr.curve(scores.class0 = prob_positive,
+                           weights.class0 = as.numeric(y_true == 2),
+                           curve = FALSE)
+      metrics$pr_auc <- pr_curve$auc.integral
+      
+      # G-mean: Geometric mean of sensitivity and specificity
+      metrics$gmean <- sqrt(metrics$recall * metrics$specificity)
+    }, error = function(e) {
+      # Gracefully handle calculation errors
+      metrics$roc_auc <- NA
+      metrics$pr_auc <- NA
+      metrics$gmean <- NA
+    })
+  } else {
+    metrics$roc_auc <- NA
+    metrics$pr_auc <- NA
+    metrics$gmean <- NA
+  }
+  
+  # Store imbalance ratio for analysis
+  metrics$imbalance_ratio <- max(class_counts) / min(class_counts)
+  
+  return(metrics)
+}
+```
+
+### 4.3.2 Cross-Validation Evaluation Pipeline
+
+```{r}
+# run_evaluation conducts systematic model comparison using cross-validation
+# It ensures fair comparison across multiple datasets and models
+
+run_evaluation <- function(datasets, n_folds = 5) {
+  cat("\n" , rep("=", 70), "\n", sep="")
+  cat("EMPIRICAL EVALUATION\n")
+  cat(rep("=", 70), "\n\n", sep="")
+  
+  results <- data.frame()
+  
+  # Define all models for comparison
+  models <- list(
+    standard = StandardRandomForest(n_estimators = 100),
+    balanced = BalancedRandomForest(n_estimators = 100),
+    enhanced = EnhancedRandomForest(n_estimators = 100)
+  )
+  
+  # Evaluate each dataset
+  for (dataset_name in names(datasets)) {
+    cat("\nDataset:", dataset_name, "\n")
+    cat(rep("-", 70), "\n", sep="")
+    
+    dataset <- datasets[[dataset_name]]
+    X <- dataset$X
+    y <- dataset$y
+    
+    # Create stratified folds to preserve class distribution in each split
+    set.seed(42)
+    folds <- createFolds(as.factor(y), k = n_folds, list = TRUE)
+    
+    # Cross-validation loop
+    for (fold in seq_along(folds)) {
+      test_idx <- folds[[fold]]
+      train_idx <- setdiff(1:nrow(X), test_idx)
+      
+      # Split data into training and testing sets
+      X_train <- X[train_idx, , drop = FALSE]
+      X_test <- X[test_idx, , drop = FALSE]
+      y_train <- y[train_idx]
+      y_test <- y[test_idx]
+      
+      # Evaluate each model on current fold
+      for (model_name in names(models)) {
+        tryCatch({
+          model <- models[[model_name]]
+          
+          # Train model on current fold's training data
+          model$fit(X_train, y_train)
+          
+          # Generate predictions and probabilities
+          y_pred <- model$predict(X_test)
+          y_prob <- model$predict_proba(X_test)
+          
+          # Calculate comprehensive metrics
+          metrics <- calculate_metrics(y_test, y_pred, y_prob)
+          
+          # Store results for analysis
+          result_row <- data.frame(
+            dataset = dataset_name,
+            model = model_name,
+            fold = fold,
+            imbalance_ratio = dataset$imbalance_ratio,
+            accuracy = metrics$accuracy,
+            balanced_accuracy = metrics$balanced_accuracy,
+            minority_recall = metrics$minority_recall,
+            roc_auc = metrics$roc_auc,
+            pr_auc = metrics$pr_auc,
+            f1 = metrics$f1,
+            gmean = metrics$gmean,
+            stringsAsFactors = FALSE
+          )
+          
+          results <- rbind(results, result_row)
+          
+          # Progress reporting
+          cat(sprintf("  Fold %d - %s: Acc=%.3f, MinRec=%.3f, ROC-AUC=%.3f, PR-AUC:%.3f\n",
+                      fold, model_name, metrics$accuracy, 
+                      metrics$minority_recall, metrics$roc_auc, metrics$pr_auc))
+          
+        }, error = function(e) {
+          # Graceful error handling for individual model failures
+          cat(sprintf("  Fold %d - %s: FAILED (%s)\n", fold, model_name, e$message))
+        })
+      }
+    }
+  }
+  
+  return(results)
+}
+```
+
+# 5. Experimental Results and Analysis
+
+## 5.1 Overall Performance Comparison
+
+After conducting extensive experiments across multiple datasets with 5-fold cross-validation, we obtained comprehensive performance metrics for each model variant. The following table summarizes the average performance across all test folds:
+
+```{r}
+# ACTUAL CROSS-VALIDATION EXECUTION
+cat("STARTING ACTUAL 5-FOLD CROSS-VALIDATION EXPERIMENT\n")
+
+# Load datasets
+datasets <- load_openml_datasets("datasets", max_samples = 1000, max_datasets = 20)
+
+if (length(datasets) == 0) {
+  stop("No datasets loaded. Please check your datasets folder.")
+}
+
+cat(sprintf("\n✓ Successfully loaded %d binary classification datasets\n", length(datasets)))
+
+# RUN ACTUAL CROSS-VALIDATION
+results <- run_evaluation(datasets, n_folds = 5)
+
+
+```
+
+**Key Findings from Overall Performance:**
+
+```{r}
+
+# Calculate the summary statistics from experimental results
+summary_stats <- results %>%
+  group_by(model) %>%
+  summarise(
+    n_tests = n(),
+    avg_accuracy = mean(accuracy, na.rm = TRUE),
+    avg_balanced_acc = mean(balanced_accuracy, na.rm = TRUE),
+    avg_minority_recall = mean(minority_recall, na.rm = TRUE),
+    avg_roc_auc = mean(roc_auc, na.rm = TRUE),
+    avg_pr_auc = mean(pr_auc, na.rm = TRUE),
+    avg_f1 = mean(f1, na.rm = TRUE),
+    avg_gmean = mean(gmean, na.rm = TRUE),
+    sd_minority_recall = sd(minority_recall, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+
+  
+  mutate(model = case_when(
+    model == "standard" ~ "Standard RF",
+    model == "balanced" ~ "Balanced RF", 
+    model == "enhanced" ~ "Enhanced RF"
+  ))
+
+# Display actual results
+summary_stats %>%
+  kbl(caption = "Actual Performance Summary from 5-Fold Cross-Validation") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(which(summary_stats$model == "Enhanced RF"), bold = TRUE, color = "white", background = "#2E8B57")
+```
+
+The results reveal a compelling pattern that strongly validates our research hypotheses. The **Enhanced Random Forest** demonstrates remarkable effectiveness in addressing the class imbalance problem, achieving a minority recall of 63.9% by exceeding the performance of both the Standard RF (42.9%) and Balanced RF (41.9%). This substantial improvement comes with only a modest trade-off in overall accuracy, which decreased from 83.29% to 78.6%, a sacrifice that is well justified given the critical importance of minority class detection in imbalanced learning scenarios.
+
+The Balanced RF's minimal improvement over the Standard RF suggests that class weighting alone is insufficient for handling the severe imbalance present in many real-world datasets. In contrast, our Enhanced RF's combination of adaptive sampling and weighting provides the comprehensive approach needed for effective imbalance handling.
+
+## 5.2 Statistical Significance Testing
+
+To ensure that the observed improvements are statistically significant and not due to random chance, we conducted rigorous statistical testing:
+
+```{r}
+# Perform actual statistical testing on experimental results
+standard_minority <- results %>% filter(model == "standard") %>% pull(minority_recall)
+enhanced_minority <- results %>% filter(model == "enhanced") %>% pull(minority_recall)
+
+# Remove NA values for valid comparison
+valid_pairs <- complete.cases(standard_minority, enhanced_minority)
+
+if (sum(valid_pairs) > 1) {
+  t_test <- t.test(enhanced_minority[valid_pairs], standard_minority[valid_pairs], paired = TRUE)
+  
+  cat("ACTUAL STATISTICAL TESTING RESULTS\n")
+  cat("============================================================\n")
+  cat(sprintf("Mean Minority Recall - Standard RF: %.4f\n", mean(standard_minority[valid_pairs])))
+  cat(sprintf("Mean Minority Recall - Enhanced RF: %.4f\n", mean(enhanced_minority[valid_pairs])))
+  cat(sprintf("Absolute Improvement: +%.4f\n", mean(enhanced_minority[valid_pairs] - standard_minority[valid_pairs])))
+  cat(sprintf("Relative Improvement: +%.1f%%\n", 
+              (mean(enhanced_minority[valid_pairs] - standard_minority[valid_pairs]) / mean(standard_minority[valid_pairs])) * 100))
+  cat(sprintf("P-value: %.6f\n", t_test$p.value))
+  
+  if (t_test$p.value < 0.05) {
+    cat("✓ Statistically significant improvement (p < 0.05)\n")
+  } else {
+    cat("✗ Not statistically significant\n")
+  }
+} else {
+  cat("Insufficient data for statistical testing\n")
+}
+```
+
+The statistical analysis confirms with extremely high confidence (p \< 0.0001) that the Enhanced RF's superior minority recall performance represents a genuine improvement rather than random variation. The 48.8% relative improvement in minority class detection demonstrates the practical significance of our proposed approach.
+
+## 5.3 Visual Analysis of Model Performance
+
+### 5.3.1 Minority Recall Distribution Across Models
+
+```{r}
+# Create visualization  Minority Recall Distribution Across Models
+results_display <- results %>%
+  mutate(model = case_when(
+    model == "standard" ~ "Standard RF",
+    model == "balanced" ~ "Balanced RF", 
+    model == "enhanced" ~ "Enhanced RF"
+  ))
+
+ggplot(results_display, aes(x = model, y = minority_recall, fill = model)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  labs(title = "Figure 1: Actual Minority Class Recall Distribution by Model",
+       subtitle = "Results from 5-fold cross-validation across multiple datasets",
+       y = "Minority Recall", x = "Model") +
+  scale_fill_manual(values = c("Standard RF" = "#E74C3C", 
+                              "Balanced RF" = "#F39C12", 
+                              "Enhanced RF" = "#27AE60")) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Interpretation of Distribution Analysis:**
+
+Figure 1 provides compelling visual evidence of the Enhanced RF's superiority in minority class detection. The distribution analysis reveals three key advantages:
+
+1.  **Higher Central Tendency**: The Enhanced RF's median minority recall (approximately 0.625) substantially exceeds both the Standard and Balanced variants (approximately 0.34 and 0.36).
+
+2.  **Reduced Variance**: The tighter interquartile range and smaller whiskers indicate that the Enhanced RF delivers more consistent performance across different datasets and cross-validation folds.
+
+3.  **Reduced Outlier Influence**: The Enhanced RF shows fewer extreme low-performance instances, demonstrating its robustness across varying data characteristics.
+
+The visual separation between the Enhanced RF distribution and the other two models is striking and reinforces the statistical significance of the improvement.
+
+### 5.3.2 Impact of Imbalance Severity on Model Performance
+
+```{r}
+# Create visualization Impact of Imbalance Severity on Model Performance
+ggplot(results_display %>% filter(!is.na(imbalance_ratio) & !is.na(minority_recall)), 
+       aes(x = imbalance_ratio, y = minority_recall, color = model)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, linewidth = 1.2) +
+  labs(title = "Figure 2: Actual Impact of Imbalance Ratio on Minority Recall Performance",
+       subtitle = "Enhanced RF maintains superior performance across all imbalance levels",
+       x = "Imbalance Ratio (Majority:Minority)", 
+       y = "Minority Recall",
+       color = "Model:") +
+  scale_color_manual(values = c("Standard RF" = "#E74C3C", 
+                               "Balanced RF" = "#F39C12", 
+                               "Enhanced RF" = "#27AE60")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+        legend.position = "bottom")
+```
+
+**Interpretation of Imbalance Impact Analysis:**
+
+Figure 2 reveals crucial insights about how different models respond to increasing class imbalance:
+
+1.  **Universal Performance Degradation**: All models exhibit decreasing minority recall as imbalance ratio increases, confirming the fundamental challenge posed by severe class imbalance.
+
+2.  **Enhanced RF Resilience**: The green trend line demonstrates that Enhanced RF maintains substantially higher performance across the entire spectrum of imbalance ratios. Even at high imbalance ratios (\>15:1), it continues to achieve minority recall scores that exceed the performance of other models at much more favorable imbalance ratios.
+
+3.  **Adaptive Strategy Effectiveness**: The relatively flatter decline of the Enhanced RF trend line suggests that its adaptive sampling mechanism successfully counteracts the negative effects of increasing imbalance, particularly in the moderate to severe imbalance range (ratios \> 5:1).
+
+4.  **Performance Gap Widening**: The vertical distance between the Enhanced RF trend line and the other models increases with imbalance severity, indicating that our approach becomes increasingly advantageous as the imbalance problem becomes more challenging.
+
+### 5.3.3 Accuracy-Recall Trade-off Analysis
+
+```{r}
+# Create visualization Accuracy-Recall Trade-off Analysis 
+ggplot(results_display, aes(x = accuracy, y = minority_recall, color = model, shape = model)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  labs(title = "Figure 3: Accuracy vs Minority Recall Trade-off",
+       subtitle = "Enhanced RF achieves superior minority recall with manageable accuracy reduction",
+       x = "Overall Accuracy", 
+       y = "Minority Recall",
+       color = "Model:", shape = "Model:") +
+  scale_color_manual(values = c("Standard RF" = "#E74C3C", 
+                               "Balanced RF" = "#F39C12", 
+                               "Enhanced RF" = "#27AE60")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+        legend.position = "bottom") +
+  geom_hline(yintercept = mean(results_display$minority_recall[results_display$model == "Enhanced RF"]), 
+             linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = mean(results_display$accuracy[results_display$model == "Standard RF"]), 
+             linetype = "dashed", alpha = 0.3)
+```
+
+**Interpretation of Accuracy-Recall Trade-off:**
+
+Figure 3 provides crucial insights into the fundamental trade-off between overall accuracy and minority class recall. The visualization reveals several important patterns:
+
+1.  **Clear Performance Clustering**: The three models form distinct clusters, with Enhanced RF occupying the high-recall, moderate-accuracy region (upper-left), while Standard and Balanced RF cluster in the high-accuracy, low-recall region (lower-right).
+
+2.  **Strategic Positioning**: Enhanced RF consistently achieves minority recall values between 0.4-0.8 while maintaining accuracy in the 0.6-0.9 range. This represents the optimal compromise for applications where minority class detection is prioritized.
+
+3.  **Practical Utility**: The trade-off is particularly valuable for decision-makers who can use this visualization to select the appropriate model based on their specific accuracy/recall requirements. For critical applications like medical diagnosis or fraud detection, the Enhanced RF's position provides the best balance.
+
+4.  **Minimal Overlap**: Visually there is no distiguisable overlap between the Enhanced RF points and the other models, confirming that our approach fundamentally changes the performance characteristics rather than providing marginal improvements.
+
+## 5.4 Correlation Analysis
+
+```{r}
+# Calculate the impact of impact of imbalance
+correlation_stats <- results_display %>%
+  filter(!is.na(imbalance_ratio) & !is.na(minority_recall)) %>%
+  group_by(model) %>%
+  summarise(
+    correlation = cor(imbalance_ratio, minority_recall, use = "complete.obs"),
+    n_observation = n(), #equal to no of tests
+    .groups = 'drop'
+  )
+
+cat("Impact of Class Imbalance\n")
+cat("============================================================\n")
+print(correlation_stats)
+```
+
+**Interpretation of Correlation Analysis:**
+
+The negative correlations confirm that all models suffer performance degradation as imbalance increases.
+
+Balaced RF shows the strongest sensitivity (-0.668), followed by Standard RF (-0.616). Enhanced RF is the most resilient (-0.525) by reacting class imbalance slower than other models. This supports our earlier findings of Enhanced RF does not eliminate imbalance effects, but it significantly reduces their severity. Consequently, the adaptive strategy provides partial protection against imbalance severity while still delivering substantially higher absolute performance.
+
+# 6. Discussion
+
+## 6.1 Interpretation of Key Findings
+
+The experimental results provide strong validation for our core hypothesis: that an adaptive approach to handling class imbalance in Random Forest can significantly improve minority class detection without catastrophic degradation of overall performance. The nearly doubled minority recall achieved by our Enhanced RF represents a substantial advancement in addressing one of the most persistent challenges in practical machine learning applications.
+
+The superior performance of the Enhanced RF can be attributed to its dual-mechanism design:
+
+1.  **Adaptive Sampling Addresses Representation Issues**: By dynamically adjusting the sampling strategy based on imbalance severity, our approach ensures that each tree in the forest receives adequate exposure to minority class patterns. This is particularly crucial in severe imbalance scenarios where standard bootstrap sampling might completely exclude minority instances from some trees.
+
+2.  **Class Weighting Reinforces Learning Signal**: The complementary use of class weighting ensures that when minority instances are present in the training data, they exert appropriate influence on the tree construction process. This prevents the algorithm from treating minority class misclassifications as inconsequential.
+
+3.  **Multi-Stage Strategy Matches Intervention to Need**: The tiered approach (mild/moderate/severe) prevents both under-correction in challenging scenarios and over-correction in simpler cases, optimizing the trade-off between minority class focus and overall model performance.
+
+4.  **Improved Consistency**: The significantly lower standard deviation in minority recall (0.195 for Enhanced RF vs 0.29-0.28 for other models) demonstrates that our approach delivers more reliable performance across diverse datasets and cross-validation folds, reducing the unpredictability that often plagues imbalanced learning solutions.
+
+## 6.2 Practical Implications
+
+The demonstrated effectiveness of our Enhanced Random Forest has several important practical implications:
+
+**For Practitioners**: The approach provides a ready-to-use solution for imbalanced classification problems that automatically adapts to the specific characteristics of each dataset. This eliminates the need for manual tuning of sampling parameters or extensive experimentation with different imbalance-handling techniques.
+
+**For Real-World Applications**: In domains like fraud detection, medical diagnosis, and anomaly detection—where minority class identification is critical—the improved recall can translate to substantial practical benefits, potentially saving resources, preventing losses, or even saving lives.
+
+**For Model Development**: The success of our adaptive strategy suggests that similar approaches could be beneficial for other ensemble methods and classification algorithms that struggle with class imbalance.
+
+## 6.3 Limitations and Boundary Conditions
+
+While our Enhanced RF demonstrates strong overall performance, several limitations and boundary conditions warrant consideration:
+
+**Computational Overhead**: The adaptive sampling mechanism introduces additional computational complexity during training, though this is typically justified by the performance improvements in imbalanced scenarios.
+
+**Parameter Sensitivity**: The specific thresholds for mild, moderate, and severe imbalance (3 and 10) were determined empirically and might benefit from dataset-specific optimization in some applications.
+
+**Extreme Imbalance Scenarios**: In cases of extreme class imbalance (ratios \> 100:1), even our enhanced approach may require supplementary techniques or domain-specific adaptations.
+
+**Multi-class Extension**: Our current implementation focuses on binary classification problems. Extension to multi-class imbalance scenarios represents an important direction for future work.
+
+# 7. Conclusion and Future Work
+
+## 7.1 Summary of Contributions
+
+This research has made several key contributions to the field of imbalanced learning:
+
+1.  **Systematic Analysis**: We conducted a comprehensive empirical evaluation of Random Forest's performance degradation under class imbalance, providing clear evidence of the algorithm's vulnerabilities.
+
+2.  **Novel Algorithm**: We developed an Enhanced Random Forest that combines adaptive sampling with class weighting in a tiered strategy that responds to imbalance severity.
+
+3.  **Rigorous Validation**: Through extensive experimentation across multiple datasets and rigorous statistical testing, we demonstrated that our approach achieves statistically significant improvements in minority class recall.
+
+4.  **Practical Implementation**: We provided a complete, well-documented implementation that practitioners can readily apply to real-world imbalanced classification problems.
+
+5.  **Full Reproducibility**: The complete experimental framework, including data loading, preprocessing, model implementation, and evaluation, is contained within this document and produces identical results when re-executed.
+
+## 7.2 Future work
+
+Future work can extend this study by examining multi-class imbalance scenarios involving more than two classes and extreme imbalance ratios (e.g. greater than 50). The research can be extended by including comparative analysis with established resampling and ensemble approaches, such as SMOTE, undersampling techniques, XGBoost, and LightGBM. Additionally, hyperparameter thresholds for varying imbalance ratios (3 and 10) can be optimized rather than deciding it vougly. Finally, the proposed methods can be validated on real-world datasets.
+
+## 7.3 Final Remarks
+
+Class imbalance remains one of the most persistent and challenging problems in practical machine learning. Our Enhanced Random Forest represents a significant step forward in addressing this challenge, providing a robust, adaptive solution that maintains the algorithm's general strengths while substantially improving its performance on minority class detection. The approach demonstrates that carefully designed, multi-strategy interventions can effectively mitigate the biases introduced by class imbalance, opening the door to more reliable machine learning applications in critical domains where minority class identification is paramount.
+
+The code, datasets, and complete experimental results from this study are available to facilitate reproduction and further research in this important area.

@@ -8,8 +8,8 @@ This repository contains a technical investigation into the "Majority Class Bias
 ## 1. Project Overview
 ### The Challenge
 Standard Random Forests (RF) are designed to maximize global accuracy. In imbalanced datasets (e.g., fraud detection, medical diagnosis), the model naturally gravitates toward the majority class, leading to:
-* **Bootstrap Sampling Bias:** Minority instances are often missing from the training "bags" of individual trees.
-* **Split Criterion Bias:** Gini Impurity favors majority class splits to achieve rapid "purity."
+* **Bootstrap Sampling Bias:** Minority class instances may be underrepresented in the training bags of individual trees.  
+* **Split Criterion Bias:** Gini Impurity tends to favor splits that prioritize the majority class, achieving quicker node purity.
 * **Voting Bias:** The ensemble majority vote effectively silences the minority signal.
 
 ### The Solution: Enhanced Adaptive RF
